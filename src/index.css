@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/*
+  SIGNAL design language.
+
+  Reference points: a trading terminal and a hospital monitor, not a SaaS
+  landing page. Rules we hold to:
+    · One accent colour per state. Colour means something or it is not used.
+    · No rounded corners above 2px, no shadows, no gradients. Flat and square
+      reads as instrumentation; soft and floaty reads as marketing.
+    · Tabular numerals everywhere a number can change, so digits never jitter.
+    · Density is a feature. An operator at 3am wants everything on one screen.
+    · Motion only to signal state change, never for decoration.
+*/
+
+@theme {
+  --color-bg:     #08090b;
+  --color-panel:  #0e1014;
+  --color-raised: #14171d;
+  --color-line:   #1e232b;
+  --color-fg:     #dfe5ec;
+  --color-dim:    #79838f;
+  --color-faint:  #454e59;
+
+  --color-acc:    #4ade80;  /* healthy / go */
+  --color-amber:  #fbbf24;  /* degraded / attention */
+  --color-red:    #f2555a;  /* critical / destructive */
+  --color-blue:   #60a5fa;  /* informational / closed */
+  --color-agent:  #a78bfa;  /* anything an agent did */
+
+  --font-mono: "Berkeley Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  html { color-scheme: dark; }
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Faint scanline texture. Barely visible; stops large dark panels reading flat. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    background: repeating-linear-gradient(
+      to bottom, transparent 0 3px, rgba(255,255,255,0.012) 3px 4px
+    );
+  }
+  ::selection { background: var(--color-agent); color: #000; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--color-line); }
+}
+
+@layer components {
+  .panel { @apply border border-line bg-panel; }
+  .panel-head {
+    @apply flex items-center justify-between border-b border-line px-3 py-2
+           text-[10px] font-medium uppercase tracking-[0.16em] text-dim;
+  }
+  .btn-ghost {
+    @apply border border-line px-4 py-2 text-[13px] text-dim
+           transition-colors hover:border-fg hover:text-fg;
+  }
+  .mono { font-family: var(--font-mono); }
+}
+
+@keyframes surface-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+.surface-in { animation: surface-in .18s ease-out; }
+
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 currentColor; opacity: .6; }
+  100% { box-shadow: 0 0 0 6px transparent; opacity: 0; }
+}
+.ring { animation: pulse-ring 1.6s ease-out infinite; }
