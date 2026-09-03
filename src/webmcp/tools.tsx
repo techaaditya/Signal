@@ -14,17 +14,13 @@ import { useIncident, PHASE_TOOLS } from '../store/incident';
 import { useTool, flush, toolError } from '../lib/webmcp';
 import { useElicit } from '../lib/elicitation';
 import { series, logs, health, sparkline, type Mitigation } from '../lib/telemetry';
-import {
-  SERVICES, DEPLOYS, FEATURE_FLAGS, REGIONS, INCIDENT,
-  type ServiceId, type Region,
-} from '../data/scenario';
-
-const SERVICE_IDS = SERVICES.map((s) => s.id);
+import { SERVICE_IDS, FEATURE_FLAGS, REGIONS, type Region } from '../data/scenario';
 
 export function IncidentTools() {
   const s = useIncident();
   const elicit = useElicit();
   const phase = s.phase;
+  const { profile } = s;
 
   /** PHASE_TOOLS is the single source of truth for which tools exist in which phase. */
   const isOn = (name: string) => PHASE_TOOLS[phase].includes(name);
@@ -42,13 +38,13 @@ export function IncidentTools() {
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => {
-      const svc = SERVICES.map((x) => {
-        const h = health(x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin);
+      const svc = profile.services.map((x) => {
+        const h = health(profile, x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin);
         return `  ${x.id.padEnd(15)} tier ${x.tier}  ${h.toUpperCase()}  owner:${x.owner}`;
       }).join('\n');
       return [
-        `${INCIDENT.id} · ${INCIDENT.severity} · ${INCIDENT.title}`,
-        `Detected by: ${INCIDENT.detectedBy}`,
+        `${profile.incident.id} · ${profile.incident.severity} · ${profile.incident.title}`,
+        `Detected by: ${profile.incident.detectedBy}`,
         `Phase: ${phase.toUpperCase()}${s.escalatedBy ? ` (escalated by ${s.escalatedBy})` : ''}`,
         phase === 'triage'
           ? 'You currently have read-only tools. Mitigation tools are not registered ' +
@@ -71,7 +67,9 @@ export function IncidentTools() {
     description:
       'Read a time series for one service. Returns the last 45 minutes as an ASCII ' +
       'sparkline plus current, baseline and peak values, so you can see the shape of ' +
-      'the change rather than a single number. Use region to compare blast radius.',
+      'the change rather than a single number. Use region to compare blast radius. ' +
+      'A quiet error_rate does not always mean healthy — check rps too, since a ' +
+      'service starved of traffic upstream looks quiet without being fine.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -90,7 +88,7 @@ export function IncidentTools() {
       if (!SERVICE_IDS.includes(service))
         return toolError(`"${service}" is not a known service.`, `Valid values: ${SERVICE_IDS.join(', ')}.`);
       const r = (region ?? 'all') as Region | 'all';
-      const ser = series(service, metric, r, 45, s.mitigations, s.simMin, s.mitigatedAtSimMin);
+      const ser = series(profile, service, metric, r, 45, s.mitigations, s.simMin, s.mitigatedAtSimMin);
       const vs = ser.points.map((p) => p.v);
       const now = vs.at(-1)!, base = vs[0], peak = Math.max(...vs);
       const fmt = (v: number) => metric === 'error_rate' || metric === 'db_pool_saturation'
@@ -125,7 +123,7 @@ export function IncidentTools() {
     },
     annotations: { readOnlyHint: true, untrustedContentHint: true },
     execute: async ({ service, query, limit }) => {
-      const lines = logs(service, query ?? '', Math.min(limit ?? 20, 50), s.mitigations, s.simMin, s.mitigatedAtSimMin);
+      const lines = logs(profile, service, query ?? '', Math.min(limit ?? 20, 50), s.mitigations, s.simMin, s.mitigatedAtSimMin);
       if (!lines.length)
         return toolError(`No log lines matched "${query}" on ${service}.`, 'Try a broader substring, or service "all".');
       s.addEntry({
@@ -143,7 +141,8 @@ export function IncidentTools() {
     description:
       'Recent production deploys across all services, newest first, with author, ' +
       'commit sha and a summary of what changed. Correlate the timing against when ' +
-      'the incident began.',
+      'the incident began — but a recent deploy is not automatically the cause; ' +
+      'confirm it with inspect_deploy before you act on it.',
     inputSchema: {
       type: 'object',
       properties: { within_minutes: { type: 'number', description: 'Look back this far. Default 240.' } },
@@ -151,12 +150,12 @@ export function IncidentTools() {
     annotations: { readOnlyHint: true },
     execute: async ({ within_minutes }) => {
       const w = within_minutes ?? 240;
-      const list = DEPLOYS.filter((d) => d.minutesAgo <= w);
+      const list = profile.deploys.filter((d) => d.minutesAgo <= w);
       s.addEntry({ actor: 'agent', kind: 'observation', text: `Listed ${list.length} deploys in the last ${w}m`, evidence: ['deploys'] });
       await flush();
       return list.map((d) =>
         `${String(d.minutesAgo).padStart(4)}m ago  ${d.sha}  ${d.service.padEnd(14)} ${d.author.padEnd(12)} ${d.summary}`
-      ).join('\n') + `\n\nIncident opened 31m ago. Use inspect_deploy for the diff on any sha.`;
+      ).join('\n') + `\n\nIncident opened ${profile.startMinAgo}m ago. Use inspect_deploy for the diff on any sha.`;
     },
   });
 
@@ -170,7 +169,7 @@ export function IncidentTools() {
     },
     annotations: { readOnlyHint: true },
     execute: async ({ sha }) => {
-      const d = DEPLOYS.find((x) => x.sha.startsWith(String(sha).trim()));
+      const d = profile.deploys.find((x) => x.sha.startsWith(String(sha).trim()));
       if (!d) return toolError(`No deploy matching "${sha}".`, `Call list_recent_deploys and use a sha from that list.`);
       s.addEntry({ actor: 'agent', kind: 'observation', text: `Inspected deploy ${d.sha} (${d.service})`, evidence: [`service:${d.service}`, `deploy:${d.sha}`] });
       await flush();
@@ -182,11 +181,11 @@ export function IncidentTools() {
     name: 'get_service_topology',
     description:
       'The dependency graph. Shows what calls what, so you can tell whether a service ' +
-      'is the cause of a problem or a victim of one downstream.',
+      'is the cause of a problem, a victim of one downstream, or simply cut off from traffic.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: () =>
-      SERVICES.map((x) =>
+      profile.services.map((x) =>
         `${x.name.padEnd(15)} → ${x.dependsOn.length ? x.dependsOn.join(', ') : '(no dependencies)'}`
       ).join('\n'),
   });
@@ -270,13 +269,14 @@ export function IncidentTools() {
     execute: async ({ rationale, intended_actions }, { signal }) => {
       if (phase !== 'triage')
         return `Already in ${phase.toUpperCase()}; escalation is not applicable.`;
+      s.recordDenial('escalation_requested', `Escalation requested: ${rationale}`);
       const ok = await elicit({
         kind: 'confirm',
         title: 'Unlock mitigation capabilities?',
         detail: rationale,
         impact: [
           'The agent gains: rollback_deploy, toggle_feature_flag, scale_service,',
-          'drain_region, page_oncall, publish_status_update.',
+          'drain_region, renew_certificate, page_oncall, publish_status_update.',
           '',
           'Intends to:',
           ...(intended_actions ?? []).map((a: string) => `  · ${a}`),
@@ -287,6 +287,7 @@ export function IncidentTools() {
 
       if (!ok) {
         s.addEntry({ actor: 'human', kind: 'decision', text: 'Escalation declined. Agent remains read-only.' });
+        s.recordDenial('declined', 'Escalation declined — agent remains read-only');
         await flush();
         return 'The operator declined. You remain read-only. Continue investigating, or propose a different course of action.';
       }
@@ -309,6 +310,7 @@ export function IncidentTools() {
     }, signal);
     if (!ok) {
       s.addEntry({ actor: 'human', kind: 'decision', text: `Declined: ${label}` });
+      s.recordDenial('declined', `Declined: ${label}`);
       await flush();
       return null;
     }
@@ -332,12 +334,12 @@ export function IncidentTools() {
       required: ['service', 'sha'],
     },
     execute: async ({ service, sha }, { signal }) => {
-      const d = DEPLOYS.find((x) => x.sha.startsWith(String(sha).trim()) && x.service === service);
+      const d = profile.deploys.find((x) => x.sha.startsWith(String(sha).trim()) && x.service === service);
       if (!d) return toolError(`No deploy ${sha} found on ${service}.`, 'Confirm with list_recent_deploys and retry.');
       const done = await mitigation(
         { kind: 'rollback', service },
         `Roll back ${service} to the release before ${d.sha}`,
-        [`service: ${service}`, `reverting: ${d.sha} — ${d.summary}`, `author: ${d.author}`, `tier ${SERVICES.find(x=>x.id===service)!.tier} · affects all regions`],
+        [`service: ${service}`, `reverting: ${d.sha} — ${d.summary}`, `author: ${d.author}`, `tier ${profile.services.find(x=>x.id===service)!.tier} · affects all regions`],
         signal,
       );
       if (!done) return 'The operator declined the rollback. Nothing changed in production.';
@@ -374,7 +376,7 @@ export function IncidentTools() {
 
   useTool({
     name: 'scale_service',
-    description: 'Change the replica count for a service. Relieves saturation; does not fix a bad code path.',
+    description: 'Change the replica count for a service. Relieves saturation; does not fix a bad code path or an expired certificate.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -396,7 +398,7 @@ export function IncidentTools() {
         signal,
       );
       if (!done) return 'The operator declined. Replica count is unchanged.';
-      return `${service} scaled to ${replicas}. Note this relieves symptoms; if a deploy introduced the load, scaling alone will not resolve it.`;
+      return `${service} scaled to ${replicas}. Note this relieves symptoms; if a deploy or an expired certificate introduced the problem, scaling alone will not resolve it.`;
     },
   }, isOn('scale_service'));
 
@@ -421,6 +423,35 @@ export function IncidentTools() {
   }, isOn('drain_region'));
 
   useTool({
+    name: 'renew_certificate',
+    description:
+      'Issue and install a fresh TLS certificate for a service whose current one has ' +
+      'expired or is about to. Fixes handshake failures at the edge. Not applicable to ' +
+      'a deploy-caused latency or error-rate regression — check what the evidence ' +
+      'actually points at before reaching for this.',
+    inputSchema: {
+      type: 'object',
+      properties: { service: { type: 'string', enum: SERVICE_IDS } },
+      required: ['service'],
+    },
+    execute: async ({ service }, { signal }) => {
+      if (profile.id !== 'cert')
+        return toolError(
+          `No certificate problem detected on ${service} in this incident.`,
+          'The current root cause here is unrelated to TLS. Re-check list_recent_deploys and search_logs — rollback_deploy or toggle_feature_flag is more likely to be the right tool.',
+        );
+      const done = await mitigation(
+        { kind: 'renew_cert', service },
+        `Renew TLS certificate for ${service}`,
+        [`service: ${service}`, 'issues a fresh certificate and reloads the listener', 'handshakes recover within about a minute'],
+        signal,
+      );
+      if (!done) return 'The operator declined. The certificate is unchanged.';
+      return `New certificate installed on ${service}. Give it about a minute, then re-read query_metrics (rps) to confirm traffic is flowing again before declaring anything.`;
+    },
+  }, isOn('renew_certificate'));
+
+  useTool({
     name: 'page_oncall',
     description: 'Page the on-call engineer for a team. Wakes a human up; use it when you genuinely need one.',
     inputSchema: {
@@ -437,7 +468,12 @@ export function IncidentTools() {
         detail: message, impact: [`team: ${team}`, 'sends a phone call and SMS', 'at this hour it will wake someone'],
         confirmLabel: 'Page them', danger: true,
       }, signal);
-      if (!ok) return 'The operator declined. Nobody was paged.';
+      if (!ok) {
+        s.addEntry({ actor: 'human', kind: 'decision', text: `Declined: page ${team}` });
+        s.recordDenial('declined', `Declined: page ${team}`);
+        await flush();
+        return 'The operator declined. Nobody was paged.';
+      }
       useIncident.setState((st) => ({ pagedTeams: [...st.pagedTeams, team] }));
       s.addEntry({ actor: 'agent', kind: 'action', text: `Paged ${team} on-call: ${message}` });
       await flush();
@@ -469,6 +505,7 @@ export function IncidentTools() {
           draft: String(draft), commitLabel: 'Publish to status page',
         }, signal);
       } catch {
+        s.recordDenial('declined', 'Status page draft discarded by operator');
         return 'The operator discarded the draft. Nothing was published. Consider a different framing and try again.';
       }
       const edited = final.trim() !== String(draft).trim();
@@ -496,10 +533,13 @@ export function IncidentTools() {
       const ok = await elicit({
         kind: 'confirm', title: 'Declare mitigated and withdraw write access?',
         detail: evidence,
-        impact: ['rollback_deploy, toggle_feature_flag, scale_service,', 'drain_region and page_oncall will be unregistered.'],
+        impact: ['rollback_deploy, toggle_feature_flag, scale_service, renew_certificate,', 'drain_region and page_oncall will be unregistered.'],
         confirmLabel: 'Declare mitigated',
       }, signal);
-      if (!ok) return 'The operator is not satisfied yet. Keep verifying.';
+      if (!ok) {
+        s.recordDenial('declined', 'Declined: declare mitigated');
+        return 'The operator is not satisfied yet. Keep verifying.';
+      }
       s.setPhase('recover', 'ops-lead');
       await flush();
       return 'Now in RECOVER. Mitigation tools have been unregistered. Verify with verify_recovery, then resolve.';
@@ -518,14 +558,14 @@ export function IncidentTools() {
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: async () => {
-      const rows = SERVICES.filter((x) => x.tier === 1).map((x) => {
-        const er = series(x.id, 'error_rate', 'all', 5, s.mitigations, s.simMin, s.mitigatedAtSimMin);
+      const rows = profile.services.filter((x) => x.tier === 1).map((x) => {
+        const er = series(profile, x.id, 'error_rate', 'all', 5, s.mitigations, s.simMin, s.mitigatedAtSimMin);
         const now = er.points.at(-1)!.v;
-        const h = health(x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin);
+        const h = health(profile, x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin);
         return `${x.id.padEnd(15)} ${h.toUpperCase().padEnd(9)} err ${(now * 100).toFixed(2)}%  ${sparkline(er.points)}`;
       });
-      const allGood = SERVICES.filter((x) => x.tier === 1)
-        .every((x) => health(x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin) === 'healthy');
+      const allGood = profile.services.filter((x) => x.tier === 1)
+        .every((x) => health(profile, x.id, s.mitigations, s.simMin, s.mitigatedAtSimMin) === 'healthy');
       await flush();
       return rows.join('\n') + '\n\n' + (allGood
         ? 'All tier-1 services are back to baseline. Safe to resolve.'
@@ -539,15 +579,18 @@ export function IncidentTools() {
     inputSchema: { type: 'object', properties: {} },
     execute: async (_i, { signal }) => {
       const ok = await elicit({
-        kind: 'confirm', title: `Resolve ${INCIDENT.id}?`,
+        kind: 'confirm', title: `Resolve ${profile.incident.id}?`,
         detail: 'Closes the incident and opens the postmortem.',
         impact: ['All operational tools will be unregistered.', 'Only postmortem tools remain.'],
         confirmLabel: 'Resolve',
       }, signal);
-      if (!ok) return 'Still open.';
+      if (!ok) {
+        s.recordDenial('declined', 'Declined: resolve incident');
+        return 'Still open.';
+      }
       s.setPhase('review', 'ops-lead');
       await flush();
-      return `${INCIDENT.id} resolved. Now in REVIEW.`;
+      return `${profile.incident.id} resolved. Now in REVIEW.`;
     },
   }, isOn('resolve_incident'));
 
@@ -589,9 +632,10 @@ export function IncidentTools() {
           draft: String(markdown), commitLabel: 'File postmortem',
         }, signal);
       } catch {
+        s.recordDenial('declined', 'Postmortem draft discarded by operator');
         return 'The operator discarded it. Revise and try again.';
       }
-      s.setPostmortem(final);
+      s.setPostmortem(String(markdown), final);
       s.addEntry({ actor: 'human', kind: 'comms', text: 'Postmortem filed' });
       await flush();
       return 'Filed. It is rendered in the review panel.';

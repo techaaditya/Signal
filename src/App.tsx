@@ -4,7 +4,7 @@ import { IncidentTools } from './webmcp/tools';
 import { useIncident, PHASE_META, PHASE_ORDER, PHASE_TOOLS, WRITE_TOOLS } from './store/incident';
 import { hasWebMCP, useLiveTools, onToolCall, type LedgerEntry } from './lib/webmcp';
 import { series, health, sparkline } from './lib/telemetry';
-import { SERVICES, INCIDENT, SIM_MIN_PER_SEC } from './data/scenario';
+import { SCENARIOS, SIM_MIN_PER_SEC, type ScenarioId } from './data/scenario';
 
 export default function App() {
   return (
@@ -31,6 +31,7 @@ function Shell() {
     <div className="relative z-10 min-h-screen">
       <TopBar />
       {!hasWebMCP() && <NoAgentBanner />}
+      {s.compareMode && <ComparisonStrip />}
       <div className="grid gap-3 p-3 lg:grid-cols-[260px_1fr_320px]">
         <div className="space-y-3">
           <CapabilitySurface />
@@ -43,6 +44,7 @@ function Shell() {
         </div>
         <div className="space-y-3">
           <Ledger />
+          <DenialLog />
           <StatusPage />
           {s.postmortem && <Postmortem />}
         </div>
@@ -54,8 +56,9 @@ function Shell() {
 /* ------------------------------------------------------------------ top bar */
 
 function TopBar() {
-  const { phase, escalatedBy, simMin } = useIncident();
+  const { phase, escalatedBy, simMin, profile, denials, compareMode, setCompareMode } = useIncident();
   const meta = PHASE_META[phase];
+  const blocked = denials.filter((d) => d.kind === 'declined').length;
 
   return (
     <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-panel px-4 py-2.5">
@@ -64,14 +67,44 @@ function TopBar() {
         <span className="mono text-[15px] tracking-tight">SIGNAL</span>
       </div>
       <div className="mono text-[12px] text-dim">
-        <span className="text-red">{INCIDENT.severity}</span> · {INCIDENT.id} · {INCIDENT.title}
+        <span className="text-red">{profile.incident.severity}</span> · {profile.incident.id} · {profile.incident.title}
       </div>
+      <ScenarioSwitcher />
       <div className="ml-auto flex items-center gap-5 mono text-[12px]">
+        {blocked > 0 && <span className="text-dim">{blocked} blocked by phase policy</span>}
+        <button
+          onClick={() => setCompareMode(!compareMode)}
+          className={`border px-2 py-1 text-[11px] transition-colors ${
+            compareMode ? 'border-agent text-agent' : 'border-line text-faint hover:text-dim'
+          }`}
+        >
+          compare: no WebMCP
+        </button>
         <span className="text-dim">open <span className="text-fg">{Math.floor(simMin)}m</span></span>
         <span className={meta.accent}>{meta.label}</span>
         {escalatedBy && <span className="text-dim">auth: {escalatedBy}</span>}
       </div>
     </header>
+  );
+}
+
+function ScenarioSwitcher() {
+  const { scenarioId, switchScenario } = useIncident();
+  return (
+    <div className="mono flex items-center gap-1 text-[11px]">
+      {(Object.keys(SCENARIOS) as ScenarioId[]).map((id) => (
+        <button
+          key={id}
+          onClick={() => id !== scenarioId && switchScenario(id)}
+          title={`Switch to the ${SCENARIOS[id].label} incident`}
+          className={`border px-2 py-1 transition-colors ${
+            id === scenarioId ? 'border-fg text-fg' : 'border-line text-faint hover:text-dim'
+          }`}
+        >
+          {SCENARIOS[id].label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -85,9 +118,51 @@ function NoAgentBanner() {
   );
 }
 
+/* ------------------------------------------------------ WebMCP comparison */
+
+function ComparisonStrip() {
+  return (
+    <div className="grid gap-3 border-b border-line bg-raised/30 p-3 md:grid-cols-2">
+      <div className="panel">
+        <div className="panel-head"><span>With WebMCP</span><span className="text-acc">live</span></div>
+        <p className="border-b border-line px-3 py-2 text-[11px] leading-relaxed text-dim">
+          The agent calls typed tools registered directly on this page. Capability is granted
+          or withdrawn by (un)registering a tool — the model literally cannot see or call what
+          the current phase hasn't registered.
+        </p>
+        <CapabilitySurface compact />
+      </div>
+      <div className="panel border-agent/40">
+        <div className="panel-head"><span>Without WebMCP</span><span className="text-red">simulated</span></div>
+        <p className="border-b border-line px-3 py-2 text-[11px] leading-relaxed text-dim">
+          The agent has no tool surface. It must screen-scrape this page, infer intent from
+          pixels and DOM text, and act through whatever generic "click" or "type" affordance
+          its host provides — with no phase gate, no confirmation contract, and no structural
+          reason it couldn't try to click a rollback button that doesn't exist yet.
+        </p>
+        <NoWebMCPSurface />
+      </div>
+    </div>
+  );
+}
+
+function NoWebMCPSurface() {
+  const all = [...new Set(Object.values(PHASE_TOOLS).flat())];
+  return (
+    <div className="p-2">
+      {all.map((name) => (
+        <div key={name} className="mono flex items-center gap-2 py-[3px] text-[11.5px] text-faint line-through decoration-faint/60">
+          <span className="w-3 text-center">○</span>
+          <span className="truncate">{name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ------------------------------------------------- capability surface (⭐) */
 
-function CapabilitySurface() {
+function CapabilitySurface({ compact }: { compact?: boolean }) {
   const live = useLiveTools();
   const { phase } = useIncident();
   const names = new Set(live.map((t) => t.name));
@@ -96,11 +171,13 @@ function CapabilitySurface() {
   const all = [...new Set(Object.values(PHASE_TOOLS).flat())];
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <span>Agent capability surface</span>
-        <span className="text-fg">{live.length}</span>
-      </div>
+    <section className={compact ? '' : 'panel'}>
+      {!compact && (
+        <div className="panel-head">
+          <span>Agent capability surface</span>
+          <span className="text-fg">{live.length}</span>
+        </div>
+      )}
       <div className="p-2">
         {all.map((name) => {
           const on = names.has(name);
@@ -116,13 +193,15 @@ function CapabilitySurface() {
           );
         })}
       </div>
-      <p className="border-t border-line px-3 py-2 text-[11px] leading-relaxed text-dim">
-        {phase === 'triage'
-          ? 'Struck-through tools are not registered. They are absent from the agent\u2019s tool list, not merely discouraged.'
-          : phase === 'mitigate'
-            ? 'Write capabilities are registered because a named human authorised it.'
-            : 'Write capabilities have been withdrawn.'}
-      </p>
+      {!compact && (
+        <p className="border-t border-line px-3 py-2 text-[11px] leading-relaxed text-dim">
+          {phase === 'triage'
+            ? 'Struck-through tools are not registered. They are absent from the agent’s tool list, not merely discouraged.'
+            : phase === 'mitigate'
+              ? 'Write capabilities are registered because a named human authorised it.'
+              : 'Write capabilities have been withdrawn.'}
+        </p>
+      )}
     </section>
   );
 }
@@ -130,15 +209,15 @@ function CapabilitySurface() {
 /* ---------------------------------------------------------------- services */
 
 function ServiceGrid() {
-  const { mitigations, simMin, mitigatedAtSimMin } = useIncident();
+  const { mitigations, simMin, mitigatedAtSimMin, profile } = useIncident();
   return (
     <section className="panel">
       <div className="panel-head"><span>Services</span></div>
       <div className="p-2">
-        {SERVICES.map((svc) => {
-          const h = health(svc.id, mitigations, simMin, mitigatedAtSimMin);
+        {profile.services.map((svc) => {
+          const h = health(profile, svc.id, mitigations, simMin, mitigatedAtSimMin);
           const c = h === 'critical' ? 'text-red' : h === 'degraded' ? 'text-amber' : 'text-acc';
-          const er = series(svc.id, 'error_rate', 'all', 12, mitigations, simMin, mitigatedAtSimMin);
+          const er = series(profile, svc.id, 'error_rate', 'all', 12, mitigations, simMin, mitigatedAtSimMin);
           return (
             <div key={svc.id} className="flex items-center gap-2 py-1">
               <span className={`h-1.5 w-1.5 shrink-0 ${c} bg-current`} />
@@ -187,19 +266,44 @@ function PhaseRail() {
 
 /* ----------------------------------------------------------------- metrics */
 
+interface FeaturedMetric {
+  service: Parameters<typeof series>[1];
+  metric: Parameters<typeof series>[2];
+  label: string;
+  color: string;
+  fmt: (v: number) => string;
+}
+
 function Metrics() {
-  const { mitigations, simMin, mitigatedAtSimMin } = useIncident();
-  const p99 = series('checkout-api', 'p99_latency_ms', 'all', 45, mitigations, simMin, mitigatedAtSimMin);
-  const pool = series('catalog-db', 'db_pool_saturation', 'all', 45, mitigations, simMin, mitigatedAtSimMin);
+  const { mitigations, simMin, mitigatedAtSimMin, profile } = useIncident();
+
+  // Which two charts tell this incident's story best. A p99/pool-saturation
+  // pair says nothing useful during a total-outage TLS failure; an
+  // error-rate/traffic pair says nothing useful during a gradual DB cascade.
+  const featured: FeaturedMetric[] = profile.id === 'cert'
+    ? [
+        { service: 'edge-gateway', metric: 'error_rate', label: 'edge-gateway · handshake error rate', color: 'var(--color-red)', fmt: (v) => `${(v * 100).toFixed(1)}%` },
+        { service: 'checkout-api', metric: 'rps', label: 'checkout-api · inbound traffic', color: 'var(--color-amber)', fmt: (v) => `${v.toFixed(0)}/s` },
+      ]
+    : [
+        { service: 'checkout-api', metric: 'p99_latency_ms', label: 'checkout-api · p99 latency', color: 'var(--color-red)', fmt: (v) => `${v.toFixed(0)}ms` },
+        { service: 'catalog-db', metric: 'db_pool_saturation', label: 'catalog-db · pool saturation', color: 'var(--color-amber)', fmt: (v) => `${(v * 100).toFixed(0)}%` },
+      ];
 
   return (
     <section className="panel">
-      <div className="panel-head"><span>checkout-api · p99 latency</span>
-        <span className="text-fg">{p99.points.at(-1)!.v.toFixed(0)}ms</span></div>
-      <Chart points={p99.points} color="var(--color-red)" />
-      <div className="panel-head border-t"><span>catalog-db · pool saturation</span>
-        <span className="text-fg">{(pool.points.at(-1)!.v * 100).toFixed(0)}%</span></div>
-      <Chart points={pool.points} color="var(--color-amber)" />
+      {featured.map((f, i) => {
+        const ser = series(profile, f.service, f.metric, 'all', 45, mitigations, simMin, mitigatedAtSimMin);
+        return (
+          <div key={`${f.service}-${f.metric}`}>
+            <div className={`panel-head ${i > 0 ? 'border-t' : ''}`}>
+              <span>{f.label}</span>
+              <span className="text-fg">{f.fmt(ser.points.at(-1)!.v)}</span>
+            </div>
+            <Chart points={ser.points} color={f.color} />
+          </div>
+        );
+      })}
     </section>
   );
 }
@@ -288,6 +392,39 @@ function Ledger() {
   );
 }
 
+/* ------------------------------------------------------------- denial log */
+
+const DENIAL_STYLE: Record<string, { c: string; label: string }> = {
+  declined: { c: 'text-red', label: 'DENIED' },
+  escalation_requested: { c: 'text-amber', label: 'ASKED' },
+  phase_transition: { c: 'text-blue', label: 'PHASE' },
+};
+
+function DenialLog() {
+  const { denials } = useIncident();
+  if (!denials.length) return null;
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <span>Capability boundary</span>
+        <span className="text-fg">{denials.length}</span>
+      </div>
+      <div className="max-h-[220px] overflow-y-auto p-2">
+        {[...denials].reverse().map((d) => {
+          const style = DENIAL_STYLE[d.kind];
+          return (
+            <div key={d.id} className="surface-in flex gap-2 px-1 py-[3px] text-[11px]">
+              <span className="mono w-10 shrink-0 text-faint">T+{Math.round(d.atSimMin)}m</span>
+              <span className={`mono w-14 shrink-0 ${style.c}`}>{style.label}</span>
+              <span className="min-w-0 flex-1 truncate text-dim" title={d.text}>{d.text}</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------- status page */
 
 function StatusPage() {
@@ -313,12 +450,27 @@ function StatusPage() {
 
 function Postmortem() {
   const { postmortem } = useIncident();
+  if (!postmortem) return null;
   return (
     <section className="panel">
-      <div className="panel-head"><span>Postmortem</span></div>
-      <pre className="mono max-h-[400px] overflow-y-auto whitespace-pre-wrap p-3 text-[11.5px] leading-relaxed text-fg">
-        {postmortem}
-      </pre>
+      <div className="panel-head">
+        <span>Postmortem</span>
+        <span className="flex items-center gap-3 text-[10px] normal-case tracking-normal text-dim">
+          <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 bg-agent" />agent</span>
+          <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 bg-acc" />operator</span>
+        </span>
+      </div>
+      <div className="mono max-h-[400px] overflow-y-auto p-3 text-[11.5px] leading-relaxed">
+        {postmortem.lines.map((l, i) => (
+          <div key={i} className="flex gap-2">
+            <span
+              className={`mt-[5px] h-1.5 w-1.5 shrink-0 ${l.author === 'agent' ? 'bg-agent' : 'bg-acc'}`}
+              title={l.author === 'agent' ? 'from the agent’s draft' : 'added or edited by the operator'}
+            />
+            <span className="whitespace-pre-wrap text-fg">{l.text || ' '}</span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

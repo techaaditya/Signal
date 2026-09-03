@@ -24,7 +24,7 @@ The incident moves through four phases. **The tool surface is recomputed on ever
 | Phase | Agent can | Agent cannot |
 |---|---|---|
 | **TRIAGE** | read metrics, search logs, inspect deploys, record hypotheses, ask the operator, request escalation | change anything in production |
-| **MITIGATE** | roll back, toggle flags, scale, drain regions, page on-call, publish status updates | escalate itself — a named human already did |
+| **MITIGATE** | roll back, toggle flags, scale, drain regions, renew certificates, page on-call, publish status updates | escalate itself — a named human already did |
 | **RECOVER** | verify recovery, resolve | change production; write tools are withdrawn again |
 | **REVIEW** | read the timeline, draft the postmortem | everything else |
 
@@ -41,9 +41,19 @@ The agent discovers this itself. `get_incident_overview` tells it which capabili
 **3. A capability surface the human can see.**
 The left panel lists every tool the agent could ever hold. Registered ones are lit; unregistered ones are struck through. It is fed by `document.modelContext.getTools()` on `toolchange`, so it is the browser's own view of the agent's power, not a mock-up of it.
 
+## Beyond the phase gate
+
+**A memory of what it stopped.** Every `request_escalation`, every declined confirmation and every phase transition lands in a capability-boundary log, separate from the ordinary investigation timeline. The top bar surfaces it as a single count — *N blocked by phase policy* — so the safety boundary isn't just enforced, it's visible.
+
+**A control condition, on demand.** The "compare: no WebMCP" toggle renders the real, live capability panel next to a simulated one where nothing is ever registered — the honest picture of the alternative, where an agent has to screen-scrape the page and guess rather than call a typed tool that structurally does not exist yet.
+
+**Provenance in the postmortem.** `draft_postmortem` keeps the agent's original draft and diffs it line-by-line against what the operator actually filed. The filed postmortem renders with a left-margin dot per line — purple for the agent's own words, green for anything the operator added or rewrote — so the co-authorship claim is visible, not asserted.
+
+**A second incident with a different shape.** SIGNAL ships two scenarios, switchable from the top bar without a reload. `INC-2291` is the original gradual latency cascade, solved by a rollback. `INC-2308` is a sudden edge-gateway TLS certificate expiry — a total outage where every backend service reports *healthy* on error rate while being starved of traffic it never receives, and where `rollback_deploy` is structurally the wrong tool. Confirming this needs `query_metrics` on `rps`, not just a health check, and the deploy that actually caused it (`chore: rotate TLS certs`) is sitting in `list_recent_deploys` for both incidents — background noise in one, the root cause in the other. It's the same tool surface pointed at a real second investigation, not a replayed script.
+
 ## Implementation
 
-- **`document.modelContext.registerTool`** for all 20 tools, wrapped in a `useTool` hook that ties registration to React lifecycle. Phase change flips the hook's `enabled` flag, the `AbortController` fires, the capability disappears.
+- **`document.modelContext.registerTool`** for all 21 tools, wrapped in a `useTool` hook that ties registration to React lifecycle. Phase change flips the hook's `enabled` flag, the `AbortController` fires, the capability disappears.
 - **`toolchange` + `getTools()`** drive the live capability panel.
 - **`AbortSignal`** is threaded from `execute(input, { signal })` into every elicitation surface, so an agent-side or operator-side cancellation tears down the open dialog instead of stranding a promise.
 - **`annotations.readOnlyHint`** marks the ten observational tools; `untrustedContentHint` marks `search_logs`, since log content is attacker-influenceable and should be treated as data, not instructions.
@@ -67,6 +77,7 @@ The left panel lists every tool the agent could ever hold. Registered ones are l
 | `toggle_feature_flag` | mitigate | | Confirm-gated |
 | `scale_service` | mitigate | | Confirm-gated |
 | `drain_region` | mitigate | | Confirm-gated |
+| `renew_certificate` | mitigate | | Confirm-gated; returns a recoverable error outside the cert-expiry incident |
 | `page_oncall` | mitigate | | Confirm-gated |
 | `publish_status_update` | mitigate | | **Operator edits the draft; agent receives their edit** |
 | `declare_mitigated` | mitigate | | Voluntarily withdraws the agent's own write access |
@@ -83,7 +94,7 @@ Browser (no backend, no network calls)
 ├─ store/incident.ts ─────── phase machine + shared timeline (zustand)
 │      │                     one object read by BOTH the UI and the tools
 │      ▼
-├─ webmcp/tools.tsx ──────── 20 tools, each gated on phase
+├─ webmcp/tools.tsx ──────── 21 tools, each gated on phase
 │      │  useTool(def, enabled)
 │      ▼
 ├─ lib/webmcp.ts ─────────── registerTool + AbortController + ledger
@@ -124,6 +135,8 @@ Without WebMCP the page still loads and shows the incident read-only, with a ban
                                                 acknowledge your rewrite
 6. "declare it mitigated and write the postmortem"
 ```
+
+Then switch the top bar to **TLS cert expiry** and run it again — same tool surface, a genuinely different root cause, and `rollback_deploy` will not save you this time. Toggle **compare: no WebMCP** at any point to see the same capability panel next to the version of this product that doesn't exist without WebMCP.
 
 ## License
 

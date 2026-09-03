@@ -4,8 +4,8 @@
  */
 
 import { create } from 'zustand';
-import type { Mitigation } from '../lib/telemetry';
-import { INCIDENT, INCIDENT_START_MIN_AGO } from '../data/scenario';
+import type { Mitigation } from '../data/scenario';
+import { SCENARIOS, DEFAULT_FLAGS, DEFAULT_REPLICAS, type ScenarioId, type IncidentProfile } from '../data/scenario';
 
 export type Phase = 'triage' | 'mitigate' | 'recover' | 'review';
 
@@ -33,7 +33,7 @@ export const PHASE_TOOLS: Record<Phase, string[]> = {
   triage: [...ALWAYS_ON, 'request_escalation'],
   mitigate: [
     ...ALWAYS_ON,
-    'rollback_deploy', 'toggle_feature_flag', 'scale_service', 'drain_region',
+    'rollback_deploy', 'toggle_feature_flag', 'scale_service', 'drain_region', 'renew_certificate',
     'page_oncall', 'publish_status_update', 'declare_mitigated',
   ],
   recover: [...ALWAYS_ON, 'verify_recovery', 'resolve_incident', 'get_incident_timeline'],
@@ -57,7 +57,30 @@ export interface TimelineEntry {
   evidence?: string[];
 }
 
+/** A capability-boundary event: something the phase policy stopped, or the
+ *  operator declined, or a phase transition that changed what's possible.
+ *  Kept separate from the timeline so the top bar can show a pure count of
+ *  "things the policy or the operator said no to" without conflating it
+ *  with ordinary investigation activity. */
+export interface DenialEntry {
+  id: string;
+  atSimMin: number;
+  kind: 'escalation_requested' | 'declined' | 'phase_transition';
+  text: string;
+}
+
+export interface PostmortemLine {
+  text: string;
+  author: 'agent' | 'human';
+}
+
+export interface Postmortem {
+  lines: PostmortemLine[];
+}
+
 interface State {
+  scenarioId: ScenarioId;
+  profile: IncidentProfile;
   phase: Phase;
   /** Which named human authorised the phase escalation. Null until they do. */
   escalatedBy: string | null;
@@ -67,47 +90,70 @@ interface State {
   /** simMin at the moment the first mitigation landed. Null until one does. */
   mitigatedAtSimMin: number | null;
   timeline: TimelineEntry[];
+  denials: DenialEntry[];
   statusPagePosts: { at: number; body: string; authoredBy: Actor; editedByHuman: boolean }[];
-  postmortem: string | null;
+  postmortem: Postmortem | null;
   flags: Record<string, boolean>;
   replicas: Record<string, number>;
   drainedRegions: string[];
   pagedTeams: string[];
+  compareMode: boolean;
 
   setPhase: (p: Phase, by: string | null) => void;
   addEntry: (e: Omit<TimelineEntry, 'id' | 'at'>) => TimelineEntry;
+  recordDenial: (kind: DenialEntry['kind'], text: string) => void;
   applyMitigation: (m: Mitigation) => void;
   postStatus: (body: string, authoredBy: Actor, editedByHuman: boolean) => void;
-  setPostmortem: (md: string) => void;
+  setPostmortem: (draft: string, final: string) => void;
   tick: (dtMin: number) => void;
+  switchScenario: (id: ScenarioId) => void;
+  setCompareMode: (on: boolean) => void;
   reset: () => void;
 }
 
-const initial = {
-  phase: 'triage' as Phase,
-  escalatedBy: null,
-  simMin: INCIDENT_START_MIN_AGO,
-  mitigations: [] as Mitigation[],
-  mitigatedAtSimMin: null as number | null,
-  timeline: [
-    {
-      id: 'seed',
-      at: Date.now() - 31 * 60_000,
-      actor: 'system' as Actor,
-      kind: 'observation' as const,
-      text: `${INCIDENT.id} opened · ${INCIDENT.severity} · ${INCIDENT.detectedBy}`,
-    },
-  ],
-  statusPagePosts: [],
-  postmortem: null,
-  flags: { 'pricing.per_item_discounts': true, 'checkout.express_lane': true, 'catalog.read_replica': false },
-  replicas: { 'catalog-db': 3, 'pricing-svc': 6, 'checkout-api': 12 } as Record<string, number>,
-  drainedRegions: [] as string[],
-  pagedTeams: [] as string[],
-};
+function seedFor(profile: IncidentProfile) {
+  return {
+    scenarioId: profile.id,
+    profile,
+    phase: 'triage' as Phase,
+    escalatedBy: null,
+    simMin: profile.startMinAgo,
+    mitigations: [] as Mitigation[],
+    mitigatedAtSimMin: null as number | null,
+    timeline: [
+      {
+        id: 'seed',
+        at: Date.now() - profile.startMinAgo * 60_000,
+        actor: 'system' as Actor,
+        kind: 'observation' as const,
+        text: `${profile.incident.id} opened · ${profile.incident.severity} · ${profile.incident.detectedBy}`,
+      },
+    ],
+    denials: [] as DenialEntry[],
+    statusPagePosts: [],
+    postmortem: null as Postmortem | null,
+    flags: { ...DEFAULT_FLAGS },
+    replicas: { ...DEFAULT_REPLICAS } as Record<string, number>,
+    drainedRegions: [] as string[],
+    pagedTeams: [] as string[],
+  };
+}
+
+/** Diff an agent's original draft against what the operator actually filed,
+ *  line by line, so the postmortem can show who wrote what. A line that
+ *  survives unchanged from the draft is agent-authored; anything added or
+ *  edited by the operator is human-authored. */
+function attributeLines(draft: string, final: string): PostmortemLine[] {
+  const draftLines = new Set(draft.split('\n').map((l) => l.trim()).filter(Boolean));
+  return final.split('\n').map((text) => ({
+    text,
+    author: text.trim() && draftLines.has(text.trim()) ? 'agent' : 'human',
+  }));
+}
 
 export const useIncident = create<State>((set, get) => ({
-  ...initial,
+  ...seedFor(SCENARIOS.latency),
+  compareMode: false,
 
   setPhase: (p, by) => {
     set({ phase: p, escalatedBy: p === 'mitigate' ? by : get().escalatedBy });
@@ -118,6 +164,7 @@ export const useIncident = create<State>((set, get) => ({
         ? `${by} moved the incident to ${p.toUpperCase()}`
         : `Incident moved to ${p.toUpperCase()}`,
     });
+    get().recordDenial('phase_transition', `Phase → ${p.toUpperCase()}${by ? ` (${by})` : ''}`);
   },
 
   addEntry: (e) => {
@@ -125,6 +172,11 @@ export const useIncident = create<State>((set, get) => ({
     set((s) => ({ timeline: [...s.timeline, entry] }));
     return entry;
   },
+
+  recordDenial: (kind, text) =>
+    set((s) => ({
+      denials: [...s.denials, { id: crypto.randomUUID(), atSimMin: s.simMin, kind, text }],
+    })),
 
   applyMitigation: (m) =>
     set((s) => ({
@@ -138,9 +190,13 @@ export const useIncident = create<State>((set, get) => ({
   postStatus: (body, authoredBy, editedByHuman) =>
     set((s) => ({ statusPagePosts: [...s.statusPagePosts, { at: Date.now(), body, authoredBy, editedByHuman }] })),
 
-  setPostmortem: (md) => set({ postmortem: md }),
+  setPostmortem: (draft, final) => set({ postmortem: { lines: attributeLines(draft, final) } }),
 
   tick: (dtMin) => set((s) => ({ simMin: s.simMin + dtMin })),
 
-  reset: () => set({ ...initial, timeline: [...initial.timeline] }),
+  switchScenario: (id) => set({ ...seedFor(SCENARIOS[id]) }),
+
+  setCompareMode: (on) => set({ compareMode: on }),
+
+  reset: () => set((s) => ({ ...seedFor(s.profile) })),
 }));

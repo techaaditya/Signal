@@ -43,7 +43,7 @@ Everything in the `src/` tree of this bundle is complete, working code. You shou
 | `src/lib/webmcp.ts` | ~120 | `useTool` hook, ledger, `useLiveTools` | No |
 | `src/lib/elicitation.tsx` | ~140 | confirm / choose / edit surfaces | Style polish only |
 | `src/store/incident.ts` | ~120 | Phase machine, shared timeline | No |
-| `src/webmcp/tools.tsx` | ~450 | All 20 tools, phase-gated | **Read this carefully — it's the submission** |
+| `src/webmcp/tools.tsx` | ~450 | All 21 tools, phase-gated | **Read this carefully — it's the submission** |
 | `src/App.tsx` | ~320 | Full operator UI | Polish |
 | `src/index.css` | ~90 | Design tokens | No |
 | `README.md` | — | Judge-facing repo doc | Fill in the two URLs |
@@ -76,7 +76,7 @@ Cloudflare Pages is a sponsor and takes ninety seconds. Vercel (`npx vercel --pr
 
 1. `chrome://flags/#enable-webmcp-testing` → Enabled → **Relaunch** (the relaunch matters).
 2. Install the [Model Context Tool Inspector](https://chromewebstore.google.com/detail/model-context-tool-inspec/gbpdfapgefenggkahomfgkhfehlcenpd).
-3. Open the app. The capability panel should show 9 lit tools and 11 struck through.
+3. Open the app. The capability panel should show 9 lit tools and 12 struck through.
 4. In the Inspector, run `get_incident_overview`. You should get the service table.
 
 If `document.modelContext` is undefined: you're on http over a LAN IP (use `localhost`), or you didn't relaunch, or something set `Origin-Agent-Cluster: ?0`.
@@ -91,7 +91,7 @@ You have the hard parts done. This is polish and packaging.
 |---|---|---|---|
 | **1** | 0:00–0:30 | Repo + LICENSE first commit + **deploy to a live URL** | The URL loads for a stranger |
 | **2** | 0:30–1:30 | `npm install`, fix any type errors, get it running locally with the flag on | Capability panel shows 9/20 lit |
-| **3** | 1:30–3:00 | **Walk the whole script in the Tool Inspector.** Every tool, once. Note anything where the agent picks wrong or an error string is unhelpful. | All 20 tools invoked successfully |
+| **3** | 1:30–3:00 | **Walk the whole script in the Tool Inspector.** Every tool, once. Note anything where the agent picks wrong or an error string is unhelpful. | All 21 tools invoked successfully |
 | **4** | 3:00–4:30 | Fix tool descriptions based on §5. This is the highest-value hour in the build. | Agent picks the right tool from natural language, first try, 8/10 times |
 | **5** | 4:30–6:00 | UI polish: spacing, the elicitation modal, empty states, mobile at 390px | Looks intentional, not generated |
 | **6** | 6:00–7:00 | Add the three optional wins from §4 if time allows | — |
@@ -107,7 +107,10 @@ You have the hard parts done. This is polish and packaging.
 
 ## PART 4 — Optional Additions, Ranked by Value per Hour
 
-Only if hours 6–7 are free.
+**Status: all four shipped.** ①–③ are live in the running app; ② is a live/simulated
+side-by-side, not a real second WebMCP registration (see the note below it — that
+distinction is deliberate, not a shortcut). ④ is `INC-2308`, switchable from the top
+bar without a reload.
 
 **① The denial log (30 min, highest value).**
 Record every time the agent asked for a tool it doesn't have. You can't intercept a call to an unregistered tool directly — but you *can* record every `request_escalation`, every declined confirmation, and every phase transition, then render them as a "capability boundary events" strip. On video this reads as: *the system has a memory of what it stopped.* Add a counter to the top bar: `2 actions blocked by phase policy`.
@@ -237,7 +240,7 @@ And the inverse: capability scoping by construction. Prompt-based restrictions f
 
 #### How we implemented WebMCP
 
-Imperative API throughout, 20 tools via `document.modelContext.registerTool`.
+Imperative API throughout, 21 tools via `document.modelContext.registerTool`.
 
 The core primitive is a `useTool(def, enabled)` hook that ties registration to React lifecycle through an `AbortController`. Phase is derived state in a Zustand store; each tool's `enabled` flag is a predicate over it. When the phase changes, React unmounts the effect, the controller aborts, and the capability genuinely leaves the registry. This is not a mock — the Tool Inspector extension shows the list shrinking.
 
@@ -328,7 +331,7 @@ Record in five segments and cut them together. Do not do one long take.
 **[2:30–2:45] — Close**
 *"Declare it mitigated." Capability panel contracts. Cut to the tool list.*
 
-> "And it gives the write access back. Twenty tools, and which ones exist is a function of where we are in the incident. We don't tell the agent not to roll back production. We make rolling back unrepresentable until a human says otherwise."
+> "And it gives the write access back. Twenty-one tools, and which ones exist is a function of where we are in the incident. We don't tell the agent not to roll back production. We make rolling back unrepresentable until a human says otherwise."
 
 *URL on screen. End.*
 
@@ -375,7 +378,7 @@ Ten slides. Dark, one idea each, screenshots not bullet lists.
 
 ### Quality
 - [ ] Degrades gracefully with WebMCP off (banner + read-only view) — a judge on the wrong Chrome build must still see a product
-- [ ] All 20 tools invoked at least once via the Inspector
+- [ ] All 21 tools invoked at least once via the Inspector
 - [ ] Every error path returns an actionable string, nothing throws
 - [ ] Every success return includes resulting state
 - [ ] Capability panel is visibly correct in all four phases

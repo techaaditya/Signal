@@ -123,7 +123,7 @@ function ElicitSurface({ pending }: { pending: Pending }) {
           {req.kind === 'confirm' && (
             <>
               <button onClick={() => resolve(true)}
-                className={`px-4 py-2 text-[13px] font-medium ${req.danger ? 'bg-red text-black' : 'bg-acc text-black'}`}>
+                className={`px-4 py-2 text-[13px] font-medium ${req.danger ? 'bg-red text-bg' : 'bg-acc text-bg'}`}>
                 {req.confirmLabel}
               </button>
               <button onClick={() => resolve(false)} className="btn-ghost">Cancel</button>
@@ -140,7 +140,7 @@ function ElicitSurface({ pending }: { pending: Pending }) {
 
           {req.kind === 'edit' && (
             <>
-              <button onClick={() => resolve(draft)} className="bg-acc px-4 py-2 text-[13px] font-medium text-black">
+              <button onClick={() => resolve(draft)} className="bg-acc px-4 py-2 text-[13px] font-medium text-bg">
                 {req.commitLabel}
               </button>
               <button onClick={() => reject(new Error('operator discarded the draft'))} className="btn-ghost">

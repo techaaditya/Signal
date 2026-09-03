@@ -4,36 +4,43 @@
   SIGNAL design language.
 
   Reference points: a trading terminal and a hospital monitor, not a SaaS
-  landing page. Rules we hold to:
+  landing page — rendered on warm paper instead of a dark panel. Rules we
+  hold to:
     · One accent colour per state. Colour means something or it is not used.
     · No rounded corners above 2px, no shadows, no gradients. Flat and square
       reads as instrumentation; soft and floaty reads as marketing.
     · Tabular numerals everywhere a number can change, so digits never jitter.
     · Density is a feature. An operator at 3am wants everything on one screen.
     · Motion only to signal state change, never for decoration.
+
+  Palette: four warm tones (cream, khaki, brown, dark brown) used directly as
+  bg / panel / line / dim, plus two derived tints for hover states and faint
+  text, plus a darker derived ink for AAA body-text contrast on the cream
+  background. Status colours are darkened from their original dark-theme
+  values so they stay legible on a light ground.
 */
 
 @theme {
-  --color-bg:     #08090b;
-  --color-panel:  #0e1014;
-  --color-raised: #14171d;
-  --color-line:   #1e232b;
-  --color-fg:     #dfe5ec;
-  --color-dim:    #79838f;
-  --color-faint:  #454e59;
+  --color-bg:     #ecc998;
+  --color-panel:  #c7ac7b;
+  --color-raised: #a6885a;
+  --color-line:   #7a5a22;
+  --color-fg:     #3d2a14;
+  --color-dim:    #5b3b1b;
+  --color-faint:  #8c6a34;
 
-  --color-acc:    #4ade80;  /* healthy / go */
-  --color-amber:  #fbbf24;  /* degraded / attention */
-  --color-red:    #f2555a;  /* critical / destructive */
-  --color-blue:   #60a5fa;  /* informational / closed */
-  --color-agent:  #a78bfa;  /* anything an agent did */
+  --color-acc:    #1f7a3d;  /* healthy / go */
+  --color-amber:  #8a4e00;  /* degraded / attention */
+  --color-red:    #b3261e;  /* critical / destructive */
+  --color-blue:   #1d4ed8;  /* informational / closed */
+  --color-agent:  #6d28d9;  /* anything an agent did */
 
   --font-mono: "Berkeley Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
 
 @layer base {
-  html { color-scheme: dark; }
+  html { color-scheme: light; }
   body {
     background: var(--color-bg);
     color: var(--color-fg);
@@ -42,7 +49,7 @@
     -webkit-font-smoothing: antialiased;
     font-variant-numeric: tabular-nums;
   }
-  /* Faint scanline texture. Barely visible; stops large dark panels reading flat. */
+  /* Faint scanline texture. Barely visible; stops large warm panels reading flat. */
   body::before {
     content: "";
     position: fixed;
@@ -50,10 +57,10 @@
     pointer-events: none;
     z-index: 1;
     background: repeating-linear-gradient(
-      to bottom, transparent 0 3px, rgba(255,255,255,0.012) 3px 4px
+      to bottom, transparent 0 3px, rgba(61,42,20,0.025) 3px 4px
     );
   }
-  ::selection { background: var(--color-agent); color: #000; }
+  ::selection { background: var(--color-agent); color: var(--color-bg); }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: var(--color-line); }
 }

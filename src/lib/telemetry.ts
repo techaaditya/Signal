@@ -1,39 +1,20 @@
 /**
  * Telemetry engine. Generates metrics and logs deterministically from the
- * scenario definition, and reacts to mitigations the agent applies.
+ * active incident profile, and reacts to mitigations the agent applies.
  *
  * The key idea: `mitigations` is a set of actions already taken. Metrics are a
- * pure function of (service, region, minutesAgo, mitigations). Roll back the
- * bad deploy and the curve recovers — because the generator says so, not
- * because we faked a second dataset.
+ * pure function of (profile, service, region, minutesAgo, mitigations). Apply
+ * the correct fix for *this* incident and the curve recovers — because the
+ * generator says so, not because we faked a second dataset. Apply the wrong
+ * incident's playbook and it barely moves, because `profile.relief` says so too.
  */
 
 import {
-  SERVICES, REGION_WEIGHT, INCIDENT_START_MIN_AGO,
-  mulberry32, type ServiceId, type Region, type Health,
+  REGION_WEIGHT, mulberry32,
+  type ServiceId, type Region, type Health, type Mitigation, type IncidentProfile,
 } from '../data/scenario';
 
-export type Mitigation =
-  | { kind: 'rollback'; service: ServiceId }
-  | { kind: 'flag'; key: string; enabled: boolean }
-  | { kind: 'scale'; service: ServiceId; replicas: number }
-  | { kind: 'drain'; region: Region };
-
-/** How much each mitigation dampens the incident. 1.0 = fully resolved. */
-function relief(m: Mitigation[]): number {
-  let r = 0;
-  for (const x of m) {
-    if (x.kind === 'rollback' && x.service === 'pricing-svc') r += 0.95;
-    else if (x.kind === 'flag' && x.key === 'pricing.per_item_discounts' && !x.enabled) r += 0.85;
-    else if (x.kind === 'scale' && x.service === 'catalog-db') r += 0.25;
-    else if (x.kind === 'drain') r += 0.15;
-    else r += 0.02;
-  }
-  return Math.min(r, 1);
-}
-
-/** Minutes since mitigation takes hold — recovery is not instant. */
-const RECOVERY_RAMP_MIN = 3;
+export type { Mitigation };
 
 export interface Point { t: number; v: number }
 
@@ -51,33 +32,36 @@ export interface MetricSeries {
  * @param mitigatedAtMin  simMin value when mitigation was applied (null = not yet)
  */
 export function series(
+  profile: IncidentProfile,
   service: ServiceId,
   metric: MetricSeries['metric'],
   region: Region | 'all',
   windowMin = 45,
   mitigations: Mitigation[] = [],
-  nowMin: number = INCIDENT_START_MIN_AGO,
+  nowMin: number,
   mitigatedAtMin: number | null = null,
 ): MetricSeries {
-  const svc = SERVICES.find((s) => s.id === service)!;
+  const svc = profile.services.find((s) => s.id === service)!;
   const rnd = mulberry32(hash(service + metric + region));
   const regionMul = region === 'all' ? 0.6 : REGION_WEIGHT[region];
-  const r = relief(mitigations);
+  const r = profile.relief(mitigations);
 
   const points: Point[] = [];
   for (let ago = windowMin; ago >= 0; ago--) {
     // Absolute simulated time of this sample, in minutes since incident open.
     const at = nowMin - ago;
     let sev = 0;
-    if (at > 0) sev = Math.min(1, at / 8); // ramps up over ~8 minutes
+    if (at > 0) sev = Math.min(1, at / profile.severityRampMin);
 
     // Apply relief only after the mitigation landed, with a ramp.
     if (mitigatedAtMin !== null && at > mitigatedAtMin) {
       const since = at - mitigatedAtMin;
-      sev *= 1 - r * Math.min(1, since / RECOVERY_RAMP_MIN);
+      sev *= 1 - r * Math.min(1, since / profile.recoveryRampMin);
     }
 
+    const rpsBlast = svc.rpsBlastFactor ?? svc.blastFactor;
     const impact = sev * svc.blastFactor * regionMul;
+    const impactRps = sev * rpsBlast * regionMul;
     const jitter = 0.9 + rnd() * 0.2;
     let v: number;
 
@@ -89,8 +73,9 @@ export function series(
         v = (svc.baseErrorRate + impact * 0.14) * jitter;
         break;
       case 'rps':
-        // Traffic dips as users abandon.
-        v = 1200 * (region === 'all' ? 1 : REGION_WEIGHT[region]) * (1 - impact * 0.3) * jitter;
+        // Traffic dips as users abandon, or craters if it never reaches this service at all.
+        v = 1200 * (region === 'all' ? 1 : REGION_WEIGHT[region])
+          * Math.max(0.05, 1 - impactRps * profile.rpsDropMax) * jitter;
         break;
       case 'db_pool_saturation':
         v = Math.min(1, (0.22 + impact * 0.9) * jitter);
@@ -112,26 +97,18 @@ function round(v: number, m: MetricSeries['metric']) {
 }
 
 export function health(
+  profile: IncidentProfile,
   service: ServiceId,
   mitigations: Mitigation[],
   nowMin: number,
   mitigatedAtMin: number | null,
 ): Health {
-  const s = series(service, 'error_rate', 'all', 2, mitigations, nowMin, mitigatedAtMin);
+  const s = series(profile, service, 'error_rate', 'all', 2, mitigations, nowMin, mitigatedAtMin);
   const now = s.points.at(-1)!.v;
   if (now > 0.05) return 'critical';
   if (now > 0.012) return 'degraded';
   return 'healthy';
 }
-
-const LOG_TEMPLATES: Record<string, (n: number) => string> = {
-  'checkout-api': (n) => `upstream timeout calling pricing-svc after 3000ms (attempt ${1 + (n % 3)})`,
-  'pricing-svc': (n) => `catalog-db acquire timed out; pool 40/40 in use, ${8 + (n % 14)} waiters queued`,
-  'catalog-db': (n) => `slow query 1842ms SELECT tier_discount WHERE sku=$1 (conn ${100 + (n % 40)})`,
-  'edge-gateway': () => `502 from checkout-api, circuit half-open`,
-  'inventory-svc': () => `retrying catalog-db read, backoff 250ms`,
-  'notify-worker': () => `dispatched 214 emails ok`,
-};
 
 export interface LogLine {
   t: number; // minutes ago (negative)
@@ -141,20 +118,21 @@ export interface LogLine {
 }
 
 export function logs(
+  profile: IncidentProfile,
   service: ServiceId | 'all',
   query: string,
   limit = 25,
   mitigations: Mitigation[] = [],
-  nowMin: number = INCIDENT_START_MIN_AGO,
+  nowMin: number,
   mitigatedAtMin: number | null = null,
 ): LogLine[] {
-  const targets = service === 'all' ? SERVICES.map((s) => s.id) : [service];
+  const targets = service === 'all' ? profile.services.map((s) => s.id) : [service];
   const out: LogLine[] = [];
   const rnd = mulberry32(hash(String(service) + query));
 
   for (const id of targets) {
-    const svc = SERVICES.find((s) => s.id === id)!;
-    for (let ago = Math.max(nowMin, INCIDENT_START_MIN_AGO); ago >= 0; ago -= 2) {
+    const svc = profile.services.find((s) => s.id === id)!;
+    for (let ago = Math.max(nowMin, profile.startMinAgo); ago >= 0; ago -= 2) {
       const at = nowMin - ago;
       const mitigated = mitigatedAtMin !== null && at > mitigatedAtMin;
       const noisy = svc.blastFactor > 0.5 && !mitigated && at > 0;
@@ -164,7 +142,7 @@ export function logs(
         service: id,
         level: noisy ? (rnd() > 0.4 ? 'error' : 'warn') : 'info',
         message: noisy
-          ? LOG_TEMPLATES[id](n)
+          ? profile.logTemplates[id](n)
           : `${id} healthy · p99 nominal`,
       });
     }
